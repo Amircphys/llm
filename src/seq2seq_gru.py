@@ -152,7 +152,7 @@ class Encoder(nn.Module):
         self.n_layers = n_layers
         self.embedding = nn.Embedding(n_tokens, emb_dim)
         self.dropout = nn.Dropout(dropout)
-        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout)
+        self.rnn = nn.GRU(emb_dim, hid_dim, n_layers, dropout=dropout)
 
     def forward(self, src):
         # src has a shape of [seq_len, batch_size]
@@ -161,8 +161,8 @@ class Encoder(nn.Module):
         _, hidden = self.rnn(embedded)
 
         return hidden
-    
-    
+
+
 class Decoder(nn.Module):
     def __init__(self, n_tokens, emb_dim, hid_dim, n_layers, dropout):
         super().__init__()
@@ -171,7 +171,7 @@ class Decoder(nn.Module):
         self.hid_dim = hid_dim
         self.n_layers = n_layers
         self.embedding = nn.Embedding(n_tokens, emb_dim)
-        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout)
+        self.rnn = nn.GRU(emb_dim, hid_dim, n_layers, dropout=dropout)
         self.fc = nn.Linear(hid_dim, n_tokens)
 
     def forward(self, input, hidden):
@@ -183,11 +183,11 @@ class Decoder(nn.Module):
         # (n_directions in the decoder shall always be 1)
         input = input.unsqueeze(dim=0)
         embedded = self.embedding(input)
-        hidden = (hidden[0].contiguous(), hidden[1].contiguous())
         output, hidden = self.rnn(embedded, hidden)
         pred = self.fc(output.squeeze(0))
         return pred, hidden
     
+
 class Seq2Seq(nn.Module):
     def __init__(self, encoder, decoder):
         super().__init__()
