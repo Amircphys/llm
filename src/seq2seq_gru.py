@@ -3,6 +3,7 @@ from typing import List, Tuple, Dict
 import logging
 from collections import Counter
 import random
+import numpy as np 
 from tqdm.auto import tqdm, trange
 from nltk.tokenize import WordPunctTokenizer
 from torchtext.datasets import Multi30k
@@ -13,7 +14,6 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.utils.rnn import pad_sequence
-
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s  %(levelname)s: %(message)s')
@@ -29,8 +29,12 @@ UNK_TOKEN_ID = 0
 SOS_TOKEN_ID = 1
 EOS_TOKEN_ID = 2
 PAD_TOKEN_ID = 3
-NUM_EPOCHS = 10
+NUM_EPOCHS = 15
 CLIP = 1
+MODEL_SAVE_PATH = "../models/seq2seq_gru.pt"
+TENSORBOARD_LOGS_DIR = "new_logs"
+EVAL_TRANSLATE_SENT_IDX = [0, 100, 200, 300, 500, 600, 700, 800, 950]
+MAX_EVAL_SENTENCE_LEN = 25
 ########################################################  data  ###############################################################
 
 class DataSet:
@@ -229,9 +233,27 @@ def count_model_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def translate_sentence(src_sentence: str, dataset=Dataset, model=Seq2Seq, device="cpu") -> str:
+    with torch.no_grad():
+        input_tensor = torch.tensor(dataset.encode_sentence(
+            src_sentence, dataset.src_vocab)[::-1]).to(device).unsqueeze(1)
+        hidden = model.encoder(input_tensor)
+        inputs = [dataset.trg_vocab.get_stoi()[SOS_TOKEN]]
+        for i in range(MAX_EVAL_SENTENCE_LEN):
+            input_tensor = torch.LongTensor([inputs[-1]]).to(device)
+            temp_pred, hidden = model.decoder(input_tensor, hidden)
+            predicted_token = temp_pred.argmax(-1).item()
+            inputs.append(predicted_token)
+            if predicted_token == dataset.trg_vocab.get_stoi()[EOS_TOKEN]:
+                break
+        tokens = dataset.trg_vocab.lookup_tokens(inputs)
+        if tokens[-1] == EOS_TOKEN:
+            predict_sentense = ' '.join(tokens[1:-1])
+        else:
+            predict_sentense = ' '.join(tokens[1:])
+    return predict_sentense
 
 ######################################################## train process  ###################################################
-
 
 def train_step(
     model,
@@ -283,6 +305,20 @@ def eval_step(
     return valid_loss, perplexity
 
 
+def translate_test_sentences(eval_translate_sents_idx: List[int], dataset: Dataset, model: Seq2Seq, writer: SummaryWriter, device="cpu"):
+    model.load_state_dict(torch.load(MODEL_SAVE_PATH, weights_only=True))
+    logger.info("Some examples of translation senetences:")
+    text = ""
+    for i in eval_translate_sents_idx:
+        predict_log = f"predict sentence: {translate_sentence(dataset.valid_data[i][0], dataset, model, device)}\n"
+        test_log = f"test sentence: {dataset.valid_data[i][1]}\n\n\n"
+        logger.info(predict_log)
+        logger.info(test_log)
+        text += predict_log
+        text += test_log
+    
+    writer.add_text("Example of translation", text_string=text)
+
 def train_model(
     model,
     train_dataloader,
@@ -296,6 +332,7 @@ def train_model(
     device,
     ):
     last_global_step = 0
+    best_perplexity = float('inf')
     for epoch in trange(num_epochs, desc="Epochs"):
         train_loss, train_perplexity, last_global_step = train_step(
             model,
@@ -317,9 +354,13 @@ def train_model(
             criterion,
             device
         )
+        if valid_perplexity < best_perplexity:
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+            best_perplexity = valid_perplexity
+            
         writer.add_scalar("Evaluation/valid_loss", valid_loss, epoch)
         writer.add_scalar("Evaluation/valid_perplexity", valid_perplexity, epoch)
-        logger.info(f"valid loss: {train_perplexity}")
+        logger.info(f"valid loss: {valid_loss}")
         
     return train_perplexity, valid_perplexity
 
@@ -340,6 +381,7 @@ def main():
     logger.debug(f"Number of params for model: {num_params}")
     criterion = nn.CrossEntropyLoss(ignore_index=dataset.trg_vocab["<pad>"])
     optimizer = torch.optim.Adam(model.parameters())
+    writer = SummaryWriter()
     
     logger.debug(f"Start train model...")
     train_perplexity, valid_perplexity = train_model(
@@ -351,9 +393,10 @@ def main():
         clip=CLIP,
         num_epochs=NUM_EPOCHS,
         global_step=0,
-        writer=SummaryWriter(),
+        writer=writer,
         device=device,
         )
+    translate_test_sentences(EVAL_TRANSLATE_SENT_IDX, dataset=dataset, model=model, writer=writer, device=device)
     end_time = datetime.now()
     logger.debug(f"Time execution: {end_time-start_time}, train_perplexity: {train_perplexity}, valid_perplexity: {valid_perplexity}")
     
